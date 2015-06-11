@@ -34,7 +34,7 @@ The Celery task queue will need to communicate with the RabbitMQ broker. RabbitM
 Use the file [`examples/celery-rabbitmq/rabbitmq-service.yaml`](rabbitmq-service.yaml):
 
 ```yaml
-apiVersion: v1beta3
+apiVersion: v1
 kind: Service
 metadata:
   labels:
@@ -43,8 +43,6 @@ metadata:
 spec:
   ports:
   - port: 5672
-    protocol: TCP
-    targetPort: 5672
   selector:
     app: taskQueue
     component: rabbitmq
@@ -56,8 +54,6 @@ To start the service, run:
 $ kubectl create -f examples/celery-rabbitmq/rabbitmq-service.yaml
 ```
 
-**NOTE**: If you're running Kubernetes from source, you can use `cluster/kubectl.sh` instead of `kubectl`.
-
 This service allows other pods to connect to the rabbitmq. To them, it will be seen as available on port 5672, although the service is routing the traffic to the container (also via port 5672).
 
 
@@ -66,7 +62,7 @@ This service allows other pods to connect to the rabbitmq. To them, it will be s
 A RabbitMQ broker can be turned up using the file [`examples/celery-rabbitmq/rabbitmq-controller.yaml`](rabbitmq-controller.yaml):
 
 ```yaml
-apiVersion: v1beta3
+apiVersion: v1
 kind: ReplicationController
 metadata:
   labels:
@@ -87,7 +83,6 @@ spec:
         name: rabbitmq
         ports:
         - containerPort: 5672
-          protocol: TCP
         resources:
           limits:
             cpu: 100m
@@ -103,7 +98,7 @@ Note that bringing up the pod includes pulling down a docker image, which may ta
 Bringing up the celery worker is done by running `$ kubectl create -f examples/celery-rabbitmq/celery-controller.yaml`, which contains this:
 
 ```yaml
-apiVersion: v1beta3
+apiVersion: v1
 kind: ReplicationController
 metadata:
   labels:
@@ -124,7 +119,6 @@ spec:
         name: celery
         ports:
         - containerPort: 5672
-          protocol: TCP
         resources:
           limits:
             cpu: 100m
@@ -181,7 +175,7 @@ Flower is a web-based tool for monitoring and administrating Celery clusters. By
 To bring up the frontend, run this command `$ kubectl create -f examples/celery-rabbitmq/flower-controller.yaml`. This controller is defined as so:
 
 ```yaml
-apiVersion: v1beta3
+apiVersion: v1
 kind: ReplicationController
 metadata:
   labels:
@@ -203,7 +197,6 @@ spec:
         ports:
         - containerPort: 5555
           hostPort: 5555
-          protocol: TCP
         resources:
           limits:
             cpu: 100m

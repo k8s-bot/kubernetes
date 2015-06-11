@@ -48,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master/ports"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/mount"
+	nodeutil "github.com/GoogleCloudPlatform/kubernetes/pkg/util/node"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
@@ -185,10 +186,10 @@ func (s *KubeletServer) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&s.FileCheckFrequency, "file-check-frequency", s.FileCheckFrequency, "Duration between checking config files for new data")
 	fs.DurationVar(&s.HTTPCheckFrequency, "http-check-frequency", s.HTTPCheckFrequency, "Duration between checking http for new data")
 	fs.StringVar(&s.ManifestURL, "manifest-url", s.ManifestURL, "URL for accessing the container manifest")
-	fs.BoolVar(&s.EnableServer, "enable-server", s.EnableServer, "Enable the info server")
-	fs.Var(&s.Address, "address", "The IP address for the info server to serve on (set to 0.0.0.0 for all interfaces)")
-	fs.UintVar(&s.Port, "port", s.Port, "The port for the info server to serve on")
-	fs.UintVar(&s.ReadOnlyPort, "read-only-port", s.ReadOnlyPort, "The read-only port for the info server to serve on (set to 0 to disable)")
+	fs.BoolVar(&s.EnableServer, "enable-server", s.EnableServer, "Enable the Kubelet's server")
+	fs.Var(&s.Address, "address", "The IP address for the Kubelet to serve on (set to 0.0.0.0 for all interfaces)")
+	fs.UintVar(&s.Port, "port", s.Port, "The port for the Kubelet to serve on. Note that \"kubectl logs\" will not work if you set this flag.") // see #9325
+	fs.UintVar(&s.ReadOnlyPort, "read-only-port", s.ReadOnlyPort, "The read-only port for the Kubelet to serve on (set to 0 to disable)")
 	fs.StringVar(&s.TLSCertFile, "tls-cert-file", s.TLSCertFile, ""+
 		"File containing x509 Certificate for HTTPS.  (CA cert, if any, concatenated after server cert). "+
 		"If --tls_cert_file and --tls_private_key_file are not provided, a self-signed certificate and key "+
@@ -253,7 +254,11 @@ func (s *KubeletServer) Run(_ []string) error {
 		glog.Warning(err)
 	}
 
-	client, err := s.createAPIServerClient()
+	var apiclient *client.Client
+	clientConfig, err := s.CreateAPIServerClientConfig()
+	if err == nil {
+		apiclient, err = client.New(clientConfig)
+	}
 	if err != nil && len(s.APIServerList) > 0 {
 		glog.Warningf("No API client: %v", err)
 	}
@@ -333,7 +338,7 @@ func (s *KubeletServer) Run(_ []string) error {
 		EnableServer:                   s.EnableServer,
 		EnableDebuggingHandlers:        s.EnableDebuggingHandlers,
 		DockerClient:                   dockertools.ConnectToDockerOrDie(s.DockerEndpoint),
-		KubeClient:                     client,
+		KubeClient:                     apiclient,
 		MasterServiceNamespace:         s.MasterServiceNamespace,
 		VolumePlugins:                  ProbeVolumePlugins(),
 		NetworkPlugins:                 ProbeNetworkPlugins(),
@@ -383,7 +388,7 @@ func (s *KubeletServer) InitializeTLS() (*kubelet.TLSOptions, error) {
 	if s.TLSCertFile == "" && s.TLSPrivateKeyFile == "" {
 		s.TLSCertFile = path.Join(s.CertDirectory, "kubelet.crt")
 		s.TLSPrivateKeyFile = path.Join(s.CertDirectory, "kubelet.key")
-		if err := util.GenerateSelfSignedCert(util.GetHostname(s.HostnameOverride), s.TLSCertFile, s.TLSPrivateKeyFile); err != nil {
+		if err := util.GenerateSelfSignedCert(nodeutil.GetHostname(s.HostnameOverride), s.TLSCertFile, s.TLSPrivateKeyFile); err != nil {
 			return nil, fmt.Errorf("unable to generate self signed cert: %v", err)
 		}
 		glog.V(4).Infof("Using self-signed cert (%s, %s)", s.TLSCertFile, s.TLSPrivateKeyFile)
@@ -453,7 +458,11 @@ func (s *KubeletServer) createClientConfig() (*client.Config, error) {
 	return clientConfig, nil
 }
 
-func (s *KubeletServer) createAPIServerClient() (*client.Client, error) {
+// CreateAPIServerClientConfig generates a client.Config from command line flags,
+// including api-server-list, via createClientConfig and then injects chaos into
+// the configuration via addChaosToClientConfig. This func is exported to support
+// integration with third party kubelet extensions (e.g. kubernetes-mesos).
+func (s *KubeletServer) CreateAPIServerClientConfig() (*client.Config, error) {
 	if len(s.APIServerList) < 1 {
 		return nil, fmt.Errorf("no api servers specified")
 	}
@@ -467,11 +476,7 @@ func (s *KubeletServer) createAPIServerClient() (*client.Client, error) {
 		return nil, err
 	}
 	s.addChaosToClientConfig(clientConfig)
-	client, err := client.New(clientConfig)
-	if err != nil {
-		return nil, err
-	}
-	return client, nil
+	return clientConfig, nil
 }
 
 // addChaosToClientConfig injects random errors into client connections if configured.
@@ -554,7 +559,7 @@ func SimpleKubelet(client *client.Client,
 //   3 Standalone 'kubernetes' binary
 // Eventually, #2 will be replaced with instances of #3
 func RunKubelet(kcfg *KubeletConfig, builder KubeletBuilder) error {
-	kcfg.Hostname = util.GetHostname(kcfg.HostnameOverride)
+	kcfg.Hostname = nodeutil.GetHostname(kcfg.HostnameOverride)
 	eventBroadcaster := record.NewBroadcaster()
 	kcfg.Recorder = eventBroadcaster.NewRecorder(api.EventSource{Component: "kubelet", Host: kcfg.Hostname})
 	eventBroadcaster.StartLogging(glog.Infof)

@@ -19,16 +19,10 @@ If you want to use custom binaries or pure open source Kubernetes, please contin
 
 ### Starting a Cluster
 
-You can install a cluster with one of two one-liners:
+You can install a client and start a cluster with this command:
 
 ```bash
 curl -sS https://get.k8s.io | bash
-```
-
-or
-
-```bash
-wget -q -O - https://get.k8s.io | bash
 ```
 
 Once this command completes, you will have a master VM and four worker VMs, running as a Kubernetes cluster. By default, some containers will already be running on your cluster. Containers like `kibana` and `elasticsearch` provide [logging](../logging.md), while `heapster` provides [monitoring](../../cluster/addons/cluster-monitoring/README.md) services.
@@ -50,10 +44,10 @@ Add the appropriate binary folder to your ```PATH``` to access kubectl:
 
 ```bash
 # OS X
-export PATH=path/to/kubernetes/platforms/darwin/amd64:$PATH
+export PATH=<path/to/kubernetes-directory>/platforms/darwin/amd64:$PATH
 
 # Linux
-export PATH=path/to/kubernetes/platforms/linux/amd64:$PATH
+export PATH=<path/to/kubernetes-directory>/platforms/linux/amd64:$PATH
 ```
 
 Note: gcloud also ships with ```kubectl```, which by default is added to your path.

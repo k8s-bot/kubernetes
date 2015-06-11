@@ -22,6 +22,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -42,9 +43,11 @@ import (
 	"google.golang.org/cloud/compute/metadata"
 )
 
-const ProviderName = "gce"
-
-const EXTERNAL_IP_METADATA_URL = "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip"
+const (
+	ProviderName             = "gce"
+	EXTERNAL_IP_METADATA_URL = "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip"
+	INTERNAL_IP_METADATA_URL = "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/ip"
+)
 
 // GCECloud is an implementation of Interface, TCPLoadBalancer and Instances for Google Compute Engine.
 type GCECloud struct {
@@ -53,9 +56,7 @@ type GCECloud struct {
 	projectID        string
 	zone             string
 	instanceID       string
-
-	// We assume here that nodes and master are in the same network. TODO(cjcullen) Fix it.
-	networkName string
+	networkName      string
 
 	// Used for accessing the metadata server
 	metadataAccess func(string) (string, error)
@@ -63,8 +64,9 @@ type GCECloud struct {
 
 type Config struct {
 	Global struct {
-		TokenURL  string `gcfg:"token-url"`
-		ProjectID string `gcfg:"project-id"`
+		TokenURL    string `gcfg:"token-url"`
+		ProjectID   string `gcfg:"project-id"`
+		NetworkName string `gcfg:"network-name"`
 	}
 }
 
@@ -153,10 +155,16 @@ func newGCECloud(config io.Reader) (*GCECloud, error) {
 	if config != nil {
 		var cfg Config
 		if err := gcfg.ReadInto(&cfg, config); err != nil {
+			glog.Errorf("Couldn't read config: %v", err)
 			return nil, err
 		}
-		if cfg.Global.ProjectID != "" && cfg.Global.TokenURL != "" {
+		if cfg.Global.ProjectID != "" {
 			projectID = cfg.Global.ProjectID
+		}
+		if cfg.Global.NetworkName != "" {
+			networkName = cfg.Global.NetworkName
+		}
+		if cfg.Global.TokenURL != "" {
 			tokenSource = newAltTokenSource(cfg.Global.TokenURL)
 		}
 	}
@@ -474,17 +482,61 @@ func (gce *GCECloud) getInstanceByName(name string) (*compute.Instance, error) {
 	return res, nil
 }
 
+func (gce *GCECloud) AddSSHKeyToAllInstances(user string, keyData []byte) error {
+	project, err := gce.service.Projects.Get(gce.projectID).Do()
+	if err != nil {
+		return err
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return err
+	}
+	keyString := fmt.Sprintf("%s:%s %s@%s", user, strings.TrimSpace(string(keyData)), user, hostname)
+	found := false
+	for _, item := range project.CommonInstanceMetadata.Items {
+		if item.Key == "sshKeys" {
+			item.Value = addKey(item.Value, keyString)
+			found = true
+			break
+		}
+	}
+	if !found {
+		// This is super unlikely, so log.
+		glog.Infof("Failed to find sshKeys metadata, creating a new item")
+		project.CommonInstanceMetadata.Items = append(project.CommonInstanceMetadata.Items,
+			&compute.MetadataItems{
+				Key:   "sshKeys",
+				Value: keyString,
+			})
+	}
+	op, err := gce.service.Projects.SetCommonInstanceMetadata(gce.projectID, project.CommonInstanceMetadata).Do()
+	if err != nil {
+		return err
+	}
+	return gce.waitForGlobalOp(op)
+}
+
+func addKey(metadataBefore, keyString string) string {
+	if strings.Contains(metadataBefore, keyString) {
+		// We've already added this key
+		return metadataBefore
+	}
+	return metadataBefore + "\n" + keyString
+}
+
 // NodeAddresses is an implementation of Instances.NodeAddresses.
 func (gce *GCECloud) NodeAddresses(_ string) ([]api.NodeAddress, error) {
+	internalIP, err := gce.metadataAccess(INTERNAL_IP_METADATA_URL)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't get internal IP: %v", err)
+	}
 	externalIP, err := gce.metadataAccess(EXTERNAL_IP_METADATA_URL)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't get external IP: %v", err)
 	}
-
 	return []api.NodeAddress{
+		{Type: api.NodeInternalIP, Address: internalIP},
 		{Type: api.NodeExternalIP, Address: externalIP},
-		// TODO(mbforbes): Remove NodeLegacyHostIP once v1beta1 is removed.
-		{Type: api.NodeLegacyHostIP, Address: externalIP},
 	}, nil
 }
 
@@ -647,7 +699,7 @@ func (gce *GCECloud) AttachDisk(diskName string, readOnly bool) error {
 			return err
 		}
 		for _, disk := range instance.Disks {
-			if disk.InitializeParams.DiskName == diskName {
+			if disk.Source == attachedDisk.Source {
 				// Disk is already attached, we're good to go.
 				return nil
 			}

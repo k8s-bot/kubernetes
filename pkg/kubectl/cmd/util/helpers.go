@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
@@ -52,23 +53,42 @@ type debugError interface {
 // This method is generic to the command in use and may be used by non-Kubectl
 // commands.
 func CheckErr(err error) {
+	checkErr(err, fatal)
+}
+
+func checkErr(err error, handleErr func(string)) {
 	if err == nil {
 		return
 	}
 
+	if errors.IsInvalid(err) {
+		details := err.(*errors.StatusError).Status().Details
+		prefix := fmt.Sprintf("The %s %q is invalid:", details.Kind, details.Name)
+		errs := statusCausesToAggrError(details.Causes)
+		handleErr(MultilineError(prefix, errs))
+	}
+
 	// handle multiline errors
 	if clientcmd.IsConfigurationInvalid(err) {
-		fatal(MultilineError("Error in configuration: ", err))
+		handleErr(MultilineError("Error in configuration: ", err))
 	}
 	if agg, ok := err.(utilerrors.Aggregate); ok && len(agg.Errors()) > 0 {
-		fatal(MultipleErrors("", agg.Errors()))
+		handleErr(MultipleErrors("", agg.Errors()))
 	}
 
 	msg, ok := StandardErrorMessage(err)
 	if !ok {
 		msg = fmt.Sprintf("error: %s\n", err.Error())
 	}
-	fatal(msg)
+	handleErr(msg)
+}
+
+func statusCausesToAggrError(scs []api.StatusCause) utilerrors.Aggregate {
+	errs := make([]error, len(scs))
+	for i, sc := range scs {
+		errs[i] = fmt.Errorf("%s: %s", sc.Field, sc.Message)
+	}
+	return utilerrors.NewAggregate(errs)
 }
 
 // StandardErrorMessage translates common errors into a human readable message, or returns
