@@ -24,7 +24,6 @@ source "${KUBE_ROOT}/cluster/common.sh"
 
 case "${KUBE_OS_DISTRIBUTION}" in
   ubuntu|coreos)
-    echo "Starting cluster using os distro: ${KUBE_OS_DISTRIBUTION}" >&2
     source "${KUBE_ROOT}/cluster/aws/${KUBE_OS_DISTRIBUTION}/util.sh"
     ;;
   *)
@@ -46,6 +45,11 @@ MASTER_INTERNAL_IP=${INTERNAL_IP_BASE}${MASTER_IP_SUFFIX}
 
 MASTER_SG_NAME="kubernetes-master-${CLUSTER_ID}"
 MINION_SG_NAME="kubernetes-minion-${CLUSTER_ID}"
+
+# Be sure to map all the ephemeral drives.  We can specify more than we actually have.
+# TODO: Actually mount the correct number (especially if we have more), though this is non-trivial, and
+#  only affects the big storage instance types, which aren't a typical use case right now.
+BLOCK_DEVICE_MAPPINGS="[{\"DeviceName\": \"/dev/sdb\",\"VirtualName\":\"ephemeral0\"},{\"DeviceName\": \"/dev/sdc\",\"VirtualName\":\"ephemeral1\"},{\"DeviceName\": \"/dev/sdd\",\"VirtualName\":\"ephemeral2\"},{\"DeviceName\": \"/dev/sde\",\"VirtualName\":\"ephemeral3\"}]"
 
 function json_val {
     python -c 'import json,sys;obj=json.load(sys.stdin);print obj'$1''
@@ -354,6 +358,8 @@ function upload-server-tars() {
   SERVER_BINARY_TAR_URL=
   SALT_TAR_URL=
 
+  ensure-temp-dir
+
   if [[ -z ${AWS_S3_BUCKET-} ]]; then
       local project_hash=
       local key=$(aws configure get aws_access_key_id)
@@ -542,6 +548,8 @@ function assign-elastic-ip {
 
 
 function kube-up {
+  echo "Starting cluster using os distro: ${KUBE_OS_DISTRIBUTION}" >&2
+
   get-tokens
 
   detect-image
@@ -674,6 +682,7 @@ function kube-up {
     echo "readonly MASTER_IP_RANGE='${MASTER_IP_RANGE:-}'"
     echo "readonly KUBELET_TOKEN='${KUBELET_TOKEN}'"
     echo "readonly KUBE_PROXY_TOKEN='${KUBE_PROXY_TOKEN}'"
+    echo "readonly DOCKER_STORAGE='${DOCKER_STORAGE:-}'"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/common.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/format-disks.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/create-dynamic-salt-files.sh"
@@ -691,6 +700,7 @@ function kube-up {
     --key-name ${AWS_SSH_KEY_NAME} \
     --security-group-ids ${MASTER_SG_ID} \
     --associate-public-ip-address \
+    --block-device-mappings "${BLOCK_DEVICE_MAPPINGS}" \
     --user-data file://${KUBE_TEMP}/master-start.sh | json_val '["Instances"][0]["InstanceId"]')
   add-tag $master_id Name $MASTER_NAME
   add-tag $master_id Role $MASTER_TAG
@@ -728,14 +738,43 @@ function kube-up {
     sleep 10
   done
 
+  # Check for SSH connectivity
+  attempt=0
+  while true; do
+    echo -n Attempt "$(($attempt+1))" to check for SSH to master
+    local output
+    local ok=1
+    output=$(ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@${KUBE_MASTER_IP} uptime 2> $LOG) || ok=0
+    if [[ ${ok} == 0 ]]; then
+      if (( attempt > 30 )); then
+        echo
+        echo "(Failed) output was: ${output}"
+        echo
+        echo -e "${color_red}Unable to ssh to master on ${KUBE_MASTER_IP}. Your cluster is unlikely" >&2
+        echo "to work correctly. Please run ./cluster/kube-down.sh and re-create the" >&2
+        echo -e "cluster. (sorry!)${color_norm}" >&2
+        exit 1
+      fi
+    else
+      echo -e " ${color_green}[ssh to master working]${color_norm}"
+      break
+    fi
+    echo -e " ${color_yellow}[ssh to master not working yet]${color_norm}"
+    attempt=$(($attempt+1))
+    sleep 10
+  done
+
   # We need the salt-master to be up for the minions to work
   attempt=0
   while true; do
     echo -n Attempt "$(($attempt+1))" to check for salt-master
     local output
-    output=$(ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@${KUBE_MASTER_IP} pgrep salt-master 2> $LOG) || output=""
-    if [[ -z "${output}" ]]; then
+    local ok=1
+    output=$(ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@${KUBE_MASTER_IP} pgrep salt-master 2> $LOG) || ok=0
+    if [[ ${ok} == 0 ]]; then
       if (( attempt > 30 )); then
+        echo
+        echo "(Failed) output was: ${output}"
         echo
         echo -e "${color_red}salt-master failed to start on ${KUBE_MASTER_IP}. Your cluster is unlikely" >&2
         echo "to work correctly. Please run ./cluster/kube-down.sh and re-create the" >&2
@@ -772,6 +811,7 @@ function kube-up {
       --key-name ${AWS_SSH_KEY_NAME} \
       --security-group-ids ${MINION_SG_ID} \
       ${public_ip_option} \
+      --block-device-mappings "${BLOCK_DEVICE_MAPPINGS}" \
       --user-data "file://${KUBE_TEMP}/minion-user-data-${i}" | json_val '["Instances"][0]["InstanceId"]')
 
     add-tag $minion_id Name ${MINION_NAMES[$i]}
